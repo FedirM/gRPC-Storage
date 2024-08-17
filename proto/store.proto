@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+
+package storage;
+
+service Storage {
+    rpc UploadFile(stream UploadFileRequest) returns (UploadFileResponse);
+    rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+    rpc FetchFile(FetchFileRequest) returns (stream FetchFileResponse);
+}
+
+message UploadFileRequest {
+    oneof data {
+        string fileName = 1;
+        bytes chunk = 2;
+    }
+}
+
+message UploadFileResponse {
+    string fileName = 1;
+    string fileHash = 2;
+}
+
+message DeleteFileRequest {
+    string fileHash = 1;
+}
+
+message DeleteFileResponse {
+    int32 code = 1;
+    string message = 2;
+}
+
+message FetchFileRequest {
+    string fileHash = 1;
+}
+
+message FetchFileResponse {
+    bytes chunk = 2;
+}
