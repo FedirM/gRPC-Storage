@@ -1,8 +1,8 @@
 use chrono::Utc;
 use dotenvy::dotenv;
+use log::{error, info, warn};
 use sha2::{Digest, Sha256};
-use std::env;
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 use tokio::{
     fs::{remove_file, File},
     io::{AsyncReadExt, AsyncWriteExt},
@@ -31,25 +31,26 @@ impl FileStorage {
         dotenv().ok();
         let env_dir =
             env::var("STORAGE_FOLDER").unwrap_or(env::current_dir().unwrap().display().to_string());
-        println!("Storage folder: {}", &env_dir);
+        info!("Storage folder: {}", &env_dir);
         let dir = PathBuf::from(env_dir);
 
         let limit: u64 = env::var("CHUNK_SIZE_BYTES")
             .unwrap_or("1048576".to_owned())
             .parse()
-            .expect(&format!(
-                "'CHUNK_SIZE_BYTES' - should be an integer value in range: [1;{}]",
-                u64::MAX
-            ));
-
-        if limit < 1 || limit > u64::MAX {
-            panic!(
-                "{}",
-                format!(
+            .unwrap_or_else(|_| {
+                error!(
                     "'CHUNK_SIZE_BYTES' - should be an integer value in range: [1;{}]",
                     u64::MAX
-                )
+                );
+                panic!()
+            });
+
+        if limit < 1 || limit > u64::MAX {
+            error!(
+                "'CHUNK_SIZE_BYTES' - should be an integer value in range: [1;{}]",
+                u64::MAX
             );
+            panic!();
         }
 
         if dir.exists() && dir.is_dir() {
@@ -59,7 +60,8 @@ impl FileStorage {
                 chunk_size: limit,
             };
         } else {
-            panic!("'STORAGE_FOLDER' path - doesn't exists or it's not a directory!")
+            error!("'STORAGE_FOLDER' path - doesn't exists or it's not a directory!");
+            panic!()
         }
     }
 }
@@ -93,9 +95,10 @@ impl Storage for FileStorage {
                             file_name.clone().unwrap()
                         ));
 
-                        println!("Filepath: {}", file_path.display());
+                        info!("Writing in file: {}", file_path.display());
 
                         let file = File::create(&file_path).await.map_err(|e| {
+                            error!("Failed to create file: {}", &e);
                             Status::internal(format!("Failed to create file: {}", e))
                         })?;
 
@@ -105,9 +108,11 @@ impl Storage for FileStorage {
                         if let Some(ref mut fh) = file_handler {
                             hasher.update(&chunk_data);
                             fh.write_all(&chunk_data).await.map_err(|e| {
+                                error!("Failed to write data in file: {}", &e);
                                 Status::internal(format!("Failed to write data in file: {}", e))
                             })?;
                         } else {
+                            warn!("File name should be sent before chunks!");
                             return Err(Status::internal(format!(
                                 "File name didn't specified yet!"
                             )));
@@ -132,7 +137,10 @@ impl Storage for FileStorage {
                 file_name: res.file_name,
                 file_hash: res.file_hash,
             })),
-            Err(e) => Err(Status::new(tonic::Code::Internal, format!("{:?}", e))),
+            Err(e) => {
+                error!("Error during adding new item to DB! Error: {}", &e);
+                return Err(Status::new(tonic::Code::Internal, format!("{}", e)));
+            }
         }
     }
 
@@ -147,7 +155,11 @@ impl Storage for FileStorage {
                 let path = PathBuf::from(res.file_path);
                 if !path.exists() || !path.is_file() {
                     match self.db.update_last_read_state(res.id, true) {
-                        Ok(_) => {
+                        Ok(res) => {
+                            warn!(
+                                "File \"{}\" with id:{} has problems with itself or path!",
+                                &res.file_path, res.id
+                            );
                             return Err(Status::new(
                                 tonic::Code::NotFound,
                                 format!("File not found!"),
@@ -157,7 +169,7 @@ impl Storage for FileStorage {
                     }
                 }
 
-                println!("Reading file {}", path.display());
+                info!("Reading file {}", path.display());
 
                 let (tx, rx) = mpsc::channel(self.chunk_size as usize);
                 let tx_error = tx.clone();
@@ -182,7 +194,7 @@ impl Storage for FileStorage {
                             }
 
                             if let Err(err) = tx.send(Ok(response)).await {
-                                eprintln!("Send error: {}", err);
+                                error!("Error occured during sending chunk! Err: {}", err);
                                 break;
                             }
 
@@ -195,23 +207,26 @@ impl Storage for FileStorage {
                     };
 
                     if let Err(err) = result.await {
-                        eprintln!("{}", err);
+                        error!("{}", err);
 
                         let send_result = tx_error
                             .send(Err(Status::internal("Failed to send file")))
                             .await;
 
                         if let Err(err) = send_result {
-                            eprintln!("{}", err);
+                            error!("{}", err);
                         }
                     }
                 });
                 Ok(Response::new(ReceiverStream::new(rx)))
             }
-            None => Err(Status::new(
-                tonic::Code::NotFound,
-                format!("Could not found such hash!"),
-            )),
+            None => {
+                error!("Could not found such hash!");
+                return Err(Status::new(
+                    tonic::Code::NotFound,
+                    format!("Could not found such hash!"),
+                ));
+            }
         }
     }
 
@@ -220,41 +235,67 @@ impl Storage for FileStorage {
         request: Request<DeleteFileRequest>,
     ) -> Result<Response<DeleteFileResponse>, Status> {
         let request = request.into_inner();
-        match self.db.remove_item_by_hash(request.file_hash) {
+        match self.db.remove_item_by_hash(request.file_hash.clone()) {
             Ok(item) => {
                 let path = PathBuf::from(item.file_path);
                 if !path.exists() {
+                    if !item.file_is_error {
+                        match self.db.update_last_read_state(item.id, true) {
+                            Ok(res) => {
+                                warn!("There is a problem with file \"{}\"", &res.file_path);
+                                return Err(Status::new(
+                                    tonic::Code::Internal,
+                                    format!("Could not find file!"),
+                                ));
+                            }
+                            Err(e) => {
+                                error!("Could not update error state in DB! Error: {}", e);
+                                return Err(Status::new(
+                                    tonic::Code::Internal,
+                                    format!("Internal service error!"),
+                                ));
+                            }
+                        }
+                    }
                     return Err(Status::new(
                         tonic::Code::NotFound,
                         format!("File not found!"),
                     ));
                 }
 
-                match remove_file(path).await {
+                match remove_file(&path).await {
                     Ok(_) => {
+                        info!("Delete: {}", path.display());
                         return Ok(Response::new(DeleteFileResponse {
                             code: tonic::Code::Ok as i32,
                             message: String::from("Ok"),
-                        }))
+                        }));
                     }
                     Err(_) => match self.db.update_last_read_state(item.id, true) {
-                        Ok(_) => {
+                        Ok(res) => {
+                            warn!("There is a problem with file \"{}\"", &res.file_path);
                             return Err(Status::new(
                                 tonic::Code::Internal,
                                 format!("Internal service error!"),
-                            ))
+                            ));
                         }
-                        Err(_) => Err(Status::new(
-                            tonic::Code::Internal,
-                            format!("Record not found!"),
-                        )),
+                        Err(e) => {
+                            error!("Could not update error state in DB! Error: {}", e);
+                            return Err(Status::new(
+                                tonic::Code::Internal,
+                                format!("Internal service error!"),
+                            ));
+                        }
                     },
                 }
             }
-            Err(_) => Err(Status::new(
-                tonic::Code::Internal,
-                format!("Record not found!"),
-            )),
+            Err(_) => {
+                error!("Could not found record with hash: {}", request.file_hash);
+                return Err(Status::new(
+                    tonic::Code::Internal,
+                    format!("Record not found!"),
+                ));
+            }
         }
     }
 }

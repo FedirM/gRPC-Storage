@@ -5,6 +5,7 @@ use diesel::{
     SelectableHelper,
 };
 use dotenvy::dotenv;
+use log::error;
 use std::{env, time::Duration};
 
 use crate::{
@@ -27,25 +28,29 @@ impl DbState {
 
         let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let database_max_size: u32 = match env::var("DATABASE_POOL_MAX_SIZE") {
-            Ok(val) => val
-                .parse()
-                .expect(&format!("0 < DATABASE_POOL_MAX_SIZE < {}", u32::MAX)),
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                error!("0 < DATABASE_POOL_MAX_SIZE < {}", u32::MAX);
+                panic!()
+            }),
             Err(_) => 10,
         };
 
         let database_connection_timeout: u64 = match env::var("DATABASE_POOL_CONNECTION_TIMEOUT") {
-            Ok(val) => val.parse().expect(&format!(
-                "0 < DATABASE_POOL_CONNECTION_TIMEOUT (in sec) < {}",
-                u64::MAX,
-            )),
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                error!(
+                    "0 < DATABASE_POOL_CONNECTION_TIMEOUT (in sec) < {}",
+                    u64::MAX
+                );
+                panic!()
+            }),
             Err(_) => 30,
         };
 
         let database_idle_timeout: u64 = match env::var("DATABASE_POOL_IDLE_TIMEOUT") {
-            Ok(val) => val.parse().expect(&format!(
-                "0 < DATABASE_POOL_IDLE_TIMEOUT (in sec) < {}",
-                u64::MAX
-            )),
+            Ok(val) => val.parse().unwrap_or_else(|_| {
+                error!("0 < DATABASE_POOL_IDLE_TIMEOUT (in sec) < {}", u64::MAX);
+                panic!()
+            }),
             Err(_) => 600,
         };
 
@@ -58,7 +63,10 @@ impl DbState {
             .build(connection_manager)
         {
             Ok(pool) => return Self { db_pool: pool },
-            Err(e) => panic!("Couldn't create connection pool! Err: {}", e),
+            Err(e) => {
+                error!("Couldn't create connection pool! Err: {}", e);
+                panic!()
+            }
         }
     }
 
@@ -77,10 +85,7 @@ impl DbState {
                     return None;
                 }
             }
-            Err(e) => {
-                eprintln!("[get_file_by_hash] error: {} ", e);
-                return None;
-            }
+            Err(_) => None,
         }
     }
 

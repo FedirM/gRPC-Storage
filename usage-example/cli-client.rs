@@ -1,4 +1,4 @@
-use file_hash_service::storage::{
+use grpc_storage::storage::{
     storage_client::StorageClient, DeleteFileRequest, FetchFileRequest, UploadFileRequest,
 };
 use std::{
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn print_help() {
     println!("Usage:");
     println!("  upload <file_path>    - Upload a file");
-    println!("  fetch <file_hash>     - Fetch a file by its hash");
+    println!("  fetch  <file_hash>    - Fetch a file by its hash");
     println!("  delete <file_hash>    - Delete a file by its hash");
 }
 
@@ -59,10 +59,14 @@ async fn upload_file(
 
     let stream = tokio_stream::iter(vec![
         UploadFileRequest {
-            data: Some(file_hash_service::storage::upload_file_request::Data::FileName(file_name)),
+            data: Some(grpc_storage::storage::upload_file_request::Data::FileName(
+                file_name,
+            )),
         },
         UploadFileRequest {
-            data: Some(file_hash_service::storage::upload_file_request::Data::Chunk(buffer)),
+            data: Some(grpc_storage::storage::upload_file_request::Data::Chunk(
+                buffer,
+            )),
         },
     ]);
 
@@ -87,6 +91,7 @@ async fn fetch_file(
     } else {
         File::create("downloaded_file.txt")?
     };
+
     let mut stream = response;
 
     while let Some(chunk) = stream.message().await? {
